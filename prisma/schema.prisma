@@ -1,0 +1,94 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  STUDENT
+  STAFF
+}
+
+enum LaundryStatus {
+  REQUESTED
+  COLLECTED
+  WASHING
+  DRYING
+  READY
+  DELIVERED
+}
+
+enum DisputeStatus {
+  OPEN
+  INVESTIGATING
+  RESOLVED
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  name         String
+  role         UserRole  @default(STUDENT)
+  studentId    String?
+  room         String?
+  hostel       String?
+  phone        String?
+  sessions     Session[]
+  requests     LaundryRequest[]
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model LaundryRequest {
+  id          String        @id @default(cuid())
+  studentName String
+  studentId   String
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room        String
+  hostel      String
+  phone       String
+  items       String
+  pickupAt    DateTime
+  dropOffAt   DateTime
+  expectedAt  DateTime
+  notes       String        @default("")
+  batchTag    String        @unique
+  status      LaundryStatus @default(REQUESTED)
+  disputes    Dispute[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([userId])
+  @@index([status])
+}
+
+model Dispute {
+  id          String         @id @default(cuid())
+  requestId   String
+  request     LaundryRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  type        String
+  description String
+  status      DisputeStatus  @default(OPEN)
+  resolution  String         @default("")
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([requestId])
+  @@index([status])
+}
