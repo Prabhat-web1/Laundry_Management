@@ -48,12 +48,12 @@ These accounts and credentials are for local demonstration only. Replace them wi
 
 | Course topics | Project evidence |
 | --- | --- |
-| INT252: reusable components, props, JSX, hooks, controlled forms, validation, API fetching, shared/server state | `components/laundry-dashboard.tsx`, `components/providers.tsx`, `lib/validation.ts` |
-| INT257: App Router, nested/dynamic route handlers, HTTP methods, ORM/CRUD, environment variables, sessions, role-based authorization, production metadata | `app/api/`, `prisma/schema.prisma`, `lib/auth.ts`, `app/layout.tsx` |
+| INT252: reusable components, props, JSX, hooks, controlled forms, validation, API fetching, shared/server state | `components/laundry-dashboard.jsx`, `components/providers.jsx`, `lib/validation.js` |
+| INT257: App Router, nested/dynamic route handlers, HTTP methods, ORM/CRUD, environment variables, sessions, role-based authorization, production metadata | `app/api/`, `prisma/schema.prisma`, `lib/auth.js`, `app/layout.jsx` |
 
 ## Before presenting or deploying
 
-1. Run `pnpm typecheck` and `pnpm build` after local setup.
+1. Run `pnpm build` after local setup.
 2. Demonstrate both student and staff accounts: submit a collection, advance its batch, create an issue, and record a resolution.
 3. Collect real feedback from intended users and note what changed. Do not claim external use or impact without evidence.
 4. Configure a persistent production database and private credentials before deployment. The included SQLite file is for local development; serverless hosts need a compatible managed database and production datasource configuration.
