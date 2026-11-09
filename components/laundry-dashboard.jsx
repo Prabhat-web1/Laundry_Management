@@ -1,150 +1,248 @@
 "use client";
-import { useEffect, useState } from "react";
-import { AlertCircle, Bell, Check, ChevronRight, ClipboardList, Clock3, Droplets, FileWarning, HelpCircle, House, LogOut, Menu, Plus, Search, ShieldCheck, Shirt, Sparkles, X } from "lucide-react";
+import { ArrowDownRight, ArrowRight, ArrowUpRight, Bell, Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, ClipboardList, Clock3, Droplets, FileWarning, LayoutDashboard, LogOut, Menu, PackageCheck, Plus, Search, ShieldCheck, Shirt, Sparkles, WashingMachine, X, } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { disputeSchema, loginSchema, requestSchema } from "@/lib/validation";
 const stages = ["REQUESTED", "COLLECTED", "WASHING", "DRYING", "READY", "DELIVERED"];
-const stageLabels = { REQUESTED: "Requested", COLLECTED: "Collected", WASHING: "Washing", DRYING: "Drying", READY: "Ready", DELIVERED: "Delivered" };
-async function api(url, options) {
-    const response = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...(options?.headers ?? {}) } });
-    const data = await response.json().catch(() => null);
+const stageLabels = {
+    REQUESTED: "Request placed", COLLECTED: "Collected", WASHING: "Washing", DRYING: "Drying", READY: "Ready for pickup", DELIVERED: "Delivered",
+};
+const stageHints = {
+    REQUESTED: "Your collection is scheduled.", COLLECTED: "Your tagged bag is at the laundry desk.", WASHING: "Your clothes are in the wash.",
+    DRYING: "Freshly washed and drying now.", READY: "All set. Pick up at the laundry desk.", DELIVERED: "Handed back to you.",
+};
+async function api(url, init) {
+    const response = await fetch(url, { ...init, headers: { "Content-Type": "application/json", ...init?.headers } });
+    const data = await response.json();
     if (!response.ok)
-        throw new Error(data?.error ?? "Something went wrong. Please try again.");
+        throw new Error(data.error ?? "Something went wrong. Please try again.");
     return data;
 }
-const formatDate = (value, withTime = false) => new Intl.DateTimeFormat("en-IN", withTime ? { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" } : { day: "numeric", month: "short" }).format(new Date(value));
-const initials = (name) => name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase();
-const itemSummary = (raw) => { try {
-    return JSON.parse(raw).map((item) => `${item.quantity} ${item.name}`).join(", ");
+function dateLabel(value, withTime = false) {
+    return new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", ...(withTime ? { hour: "numeric", minute: "2-digit" } : {}) }).format(new Date(value));
+}
+function itemList(value) { try {
+    return JSON.parse(value);
 }
 catch {
-    return raw;
-} };
+    return [];
+} }
+function quantityLabel(request) {
+    return itemList(request.items).reduce((total, item) => total + item.quantity, 0);
+}
+function displayDateTimeOffset(hours) {
+    const date = new Date(Date.now() + hours * 60 * 60 * 1000);
+    const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+    return local.toISOString().slice(0, 16);
+}
+function statusTone(status) {
+    if (status === "READY" || status === "DELIVERED" || status === "RESOLVED")
+        return "green";
+    if (status === "OPEN" || status === "REQUESTED")
+        return "amber";
+    return "blue";
+}
+function Badge({ children, tone = "blue" }) {
+    return <span className={`badge badge-${tone}`}><i />{children}</span>;
+}
 export default function LaundryDashboard() {
-    const [user, setUser] = useState(null);
-    const [loading, setLoading] = useState(true);
-    const [requests, setRequests] = useState([]);
-    const [view, setView] = useState("overview");
-    const [mobileOpen, setMobileOpen] = useState(false);
+    const queryClient = useQueryClient();
+    const [tab, setTab] = useState("overview");
     const [modal, setModal] = useState(null);
-    const [selectedRequest, setSelectedRequest] = useState(null);
+    const [detailRequest, setDetailRequest] = useState(null);
     const [notice, setNotice] = useState("");
-    const [error, setError] = useState("");
-    const refresh = async () => { const data = await api("/api/requests"); setRequests(data); };
-    useEffect(() => { api("/api/auth/session").then(async ({ user: nextUser }) => { setUser(nextUser); if (nextUser)
-        await refresh(); }).catch((reason) => setError(reason.message)).finally(() => setLoading(false)); }, []);
-    useEffect(() => { if (!notice)
-        return; const timer = window.setTimeout(() => setNotice(""), 4500); return () => window.clearTimeout(timer); }, [notice]);
-    const signOut = async () => { await api("/api/auth/logout", { method: "POST" }); setUser(null); setRequests([]); setView("overview"); };
-    const onLogin = (nextUser) => { setUser(nextUser); setError(""); refresh().catch((reason) => setError(reason.message)); };
-    if (loading)
-        return <div className="boot-screen"><div className="brand-mark"><Droplets size={21}/></div><span>Preparing your laundry dashboard…</span></div>;
+    const [mobileNav, setMobileNav] = useState(false);
+    const session = useQuery({ queryKey: ["session"], queryFn: () => api("/api/auth/session"), retry: false });
+    const user = session.data?.user ?? null;
+    const requestsQuery = useQuery({ queryKey: ["requests", user?.id], queryFn: () => api("/api/requests"), enabled: !!user });
+    const requests = requestsQuery.data ?? [];
+    const disputes = useMemo(() => requests.flatMap((request) => request.disputes.map((dispute) => ({ ...dispute, request }))), [requests]);
+    const isStaff = user?.role === "STAFF";
+    const loginMutation = useMutation({
+        mutationFn: (details) => api("/api/auth/login", { method: "POST", body: JSON.stringify(details) }),
+        onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["session"] }); setNotice("Welcome back. You’re signed in."); },
+    });
+    const logout = async () => { await api("/api/auth/logout", { method: "POST" }); queryClient.removeQueries({ queryKey: ["requests"] }); setMobileNav(false); await session.refetch(); setTab("overview"); };
+    const updateRequest = useMutation({
+        mutationFn: ({ id, status }) => api(`/api/requests/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }),
+        onSuccess: () => queryClient.invalidateQueries({ queryKey: ["requests"] }),
+    });
+    const updateDispute = useMutation({
+        mutationFn: ({ id, status, resolution }) => api(`/api/disputes/${id}`, { method: "PATCH", body: JSON.stringify({ status, resolution }) }),
+        onSuccess: () => queryClient.invalidateQueries({ queryKey: ["requests"] }),
+    });
+    const activeRequests = requests.filter((request) => request.status !== "DELIVERED");
+    const readyCount = requests.filter((request) => request.status === "READY").length;
+    const openDisputes = disputes.filter(({ status }) => status !== "RESOLVED").length;
+    const latestRequest = activeRequests[0] ?? requests[0];
+    const titleMap = {
+        overview: isStaff ? "Operations overview" : "Your laundry, sorted",
+        laundry: isStaff ? "All laundry" : "My laundry",
+        help: "Reports & resolutions",
+        operations: "Laundry operations",
+        disputes: "Dispute desk",
+    };
+    const currentDate = new Intl.DateTimeFormat("en-IN", { weekday: "long", month: "long", day: "2-digit", timeZone: "Asia/Kolkata" }).format(new Date()).toUpperCase();
+    if (session.isLoading)
+        return <div className="boot-screen"><div className="brand-mark"><Droplets size={21}/></div><span>Getting your laundry desk ready…</span></div>;
+    if (session.error)
+        return <div className="boot-screen"><div className="load-error"><CircleHelp size={22}/><strong>We couldn’t reach Washday.</strong><span>Check the app server and reload this page.</span><button className="button button-primary" onClick={() => session.refetch()}>Try again</button></div></div>;
     if (!user)
-        return <Login onLogin={onLogin} initialError={error}/>;
-    const isStaff = user.role === "STAFF";
-    const activeRequest = requests[0];
-    const openDisputes = requests.flatMap((request) => request.disputes).filter((dispute) => dispute.status !== "RESOLVED");
+        return <LoginScreen onSuccess={() => queryClient.invalidateQueries({ queryKey: ["session"] })}/>;
+    const navItems = isStaff
+        ? [{ id: "overview", label: "Overview", icon: LayoutDashboard }, { id: "operations", label: "Laundry operations", icon: WashingMachine }, { id: "disputes", label: "Dispute desk", icon: FileWarning, count: openDisputes }]
+        : [{ id: "overview", label: "Overview", icon: LayoutDashboard }, { id: "laundry", label: "My laundry", icon: Shirt }, { id: "help", label: "Reports & help", icon: CircleHelp, count: openDisputes }];
     return <div className="app-shell">
-    {mobileOpen && <button className="mobile-scrim" aria-label="Close menu" onClick={() => setMobileOpen(false)}/>}
-    <aside className={`sidebar ${mobileOpen ? "sidebar-open" : ""}`}>
-      <div className="brand"><span className="brand-mark"><Droplets size={19}/></span>Washday<span className="brand-dot">.</span></div>
+    <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
+      <a className="brand" href="#overview" onClick={(event) => { event.preventDefault(); setTab("overview"); }}><span className="brand-mark"><Droplets size={21} strokeWidth={2.6}/></span><span>washday<span className="brand-dot">.</span></span></a>
       <div className="sidebar-section-label">WORKSPACE</div>
-      <nav className="side-nav">
-        <NavButton active={view === "overview"} icon={<House size={16}/>} label="Overview" onClick={() => { setView("overview"); setMobileOpen(false); }}/>
-        <NavButton active={view === "requests"} icon={<ClipboardList size={16}/>} label={isStaff ? "Operations queue" : "My laundry"} onClick={() => { setView("requests"); setMobileOpen(false); }} count={requests.length}/>
-        <NavButton active={view === "issues"} icon={<FileWarning size={16}/>} label={isStaff ? "Investigations" : "My reports"} onClick={() => { setView("issues"); setMobileOpen(false); }} count={openDisputes.length || undefined}/>
-      </nav>
-      <div className="sidebar-bottom"><div className="service-note"><Sparkles className="service-note-icon" size={16}/><div><strong>Carefully handled</strong><p>Every batch is tagged and tracked from pickup to handover.</p></div></div><div className="profile-row"><div className="avatar">{initials(user.name)}</div><div className="profile-text"><strong>{user.name}</strong><span>{isStaff ? "Laundry staff" : `${user.hostel} · ${user.room}`}</span></div><button className="icon-button profile-logout" aria-label="Sign out" onClick={signOut}><LogOut size={15}/></button></div></div>
+      <nav className="side-nav" aria-label="Main navigation">{navItems.map(({ id, label, icon: Icon, count }) => <button key={id} className={`nav-item ${tab === id ? "nav-active" : ""}`} onClick={() => { setTab(id); setMobileNav(false); }}><Icon size={18}/><span>{label}</span>{count ? <span className="nav-count">{count}</span> : null}</button>)}</nav>
+      <div className="sidebar-bottom">
+        <div className="service-note"><span className="service-note-icon"><ShieldCheck size={15}/></span><div><strong>Every bag gets a tag</strong><p>Track it from pickup to handover.</p></div></div>
+        <div className="profile-row"><div className="avatar">{user.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</div><div className="profile-text"><strong>{user.name}</strong><span>{isStaff ? "Laundry team" : `${user.studentId} · Room ${user.room}`}</span></div><button className="icon-button profile-logout" title="Sign out" aria-label="Sign out" onClick={logout}><LogOut size={16}/></button></div>
+      </div>
     </aside>
+
     <main className="main-shell">
-      <header className="topbar"><button className="icon-button mobile-menu" aria-label="Open menu" onClick={() => setMobileOpen(true)}><Menu size={18}/></button><div className="breadcrumb"><span>Washday</span><ChevronRight size={13}/><strong>{view === "overview" ? "Overview" : view === "requests" ? (isStaff ? "Operations queue" : "My laundry") : (isStaff ? "Investigations" : "My reports")}</strong></div><div className="topbar-actions"><span className="today-label">{new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "short" }).format(new Date())}</span><button className="icon-button notification-button" aria-label="Notifications"><Bell size={15}/><i /></button><div className="top-avatar">{initials(user.name)}</div></div></header>
+      <header className="topbar"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileNav(!mobileNav)}><Menu size={20}/></button><div className="breadcrumb"><span>{user.hostel || "Maple House"}</span><ChevronRight size={14}/><strong>{titleMap[tab]}</strong></div><div className="topbar-actions"><span className="today-label">{currentDate}</span><button className="icon-button notification-button" title="Notifications"><Bell size={18}/><i /></button><div className="top-avatar">{user.name.charAt(0)}</div></div></header>
+      {notice && <div className="toast-note"><CheckCircle2 size={16}/>{notice}<button onClick={() => setNotice("")} aria-label="Dismiss"><X size={14}/></button></div>}
       <div className="page-content">
-        {notice && <div className="toast-note"><Check size={16}/>{notice}<button aria-label="Dismiss" onClick={() => setNotice("")}><X size={14}/></button></div>}
-        {view === "overview" && <Overview user={user} requests={requests} openDisputes={openDisputes.length} isStaff={isStaff} onCreate={() => setModal("request")} onRequests={() => setView("requests")} onIssues={() => setView("issues")} onSelect={setSelectedRequest}/>}
-        {view === "requests" && <RequestsPage requests={requests} isStaff={isStaff} onCreate={() => setModal("request")} onSelect={setSelectedRequest} onRefresh={refresh} setNotice={setNotice}/>}
-        {view === "issues" && <IssuesPage requests={requests} isStaff={isStaff} onCreate={() => { setSelectedRequest(requests[0] ?? null); setModal("dispute"); }} onRefresh={refresh} setNotice={setNotice}/>}
+        <div className="page-heading"><div><div className="eyebrow">{isStaff ? "LAUNDRY DESK · MAPLE HOUSE" : `GOOD MORNING, ${user.name.split(" ")[0].toUpperCase()}`}</div><h1>{titleMap[tab]}</h1><p>{isStaff ? "A clear view of every bag moving through the laundry room." : "A fresh start, and a clearer view of laundry day."}</p></div>
+          {!isStaff && <button className="button button-primary create-button" onClick={() => setModal("request")}><Plus size={17}/>New laundry request</button>}
+          {isStaff && tab === "overview" && <button className="button button-secondary" onClick={() => setTab("operations")}><ClipboardList size={16}/>Open laundry queue</button>}
+        </div>
+        {requestsQuery.isLoading ? <div className="content-loading"><span className="spinner"/>Loading laundry records…</div> : requestsQuery.error ? <div className="inline-error"><CircleHelp size={17}/>{requestsQuery.error.message}<button onClick={() => requestsQuery.refetch()}>Retry</button></div> : <>
+          {tab === "overview" && <Overview user={user} requests={requests} disputes={disputes} activeRequests={activeRequests} readyCount={readyCount} openDisputes={openDisputes} latestRequest={latestRequest} isStaff={!!isStaff} onTab={setTab} onModal={setModal} onAdvance={(request) => { const index = stages.indexOf(request.status); if (index < stages.length - 1)
+            updateRequest.mutate({ id: request.id, status: stages[index + 1] }); }} busy={updateRequest.isPending}/>}
+          {(tab === "laundry" || tab === "operations") && <LaundryList requests={requests} isStaff={!!isStaff} onSelect={setDetailRequest} onAdvance={(request) => { const index = stages.indexOf(request.status); if (index < stages.length - 1)
+            updateRequest.mutate({ id: request.id, status: stages[index + 1] }); }} busy={updateRequest.isPending}/>}
+          {(tab === "help" || tab === "disputes") && <DisputeDesk disputes={disputes} isStaff={!!isStaff} onModal={() => setModal("dispute")} onUpdate={(id, status, resolution) => updateDispute.mutate({ id, status, resolution })} busy={updateDispute.isPending}/>}
+          <footer className="page-footer"><span>Made for Maple House</span><span><span className="footer-dot"/>Your laundry stays in view.</span></footer>
+        </>}
       </div>
     </main>
-    {selectedRequest && <RequestDetails request={selectedRequest} onClose={() => setSelectedRequest(null)} onReport={() => setModal("dispute")}/>}
-    {modal === "request" && <RequestModal onClose={() => setModal(null)} onSaved={async () => { setModal(null); await refresh(); setNotice("Laundry request created successfully."); }}/>}
-    {modal === "dispute" && selectedRequest && <DisputeModal request={selectedRequest} onClose={() => setModal(null)} onSaved={async () => { setModal(null); await refresh(); setNotice("Your report has been sent to the laundry team."); }}/>}
+    {mobileNav && <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setMobileNav(false)}/>}
+    {modal === "request" && <RequestModal user={user} onClose={() => setModal(null)} onCreated={() => { setModal(null); setTab("laundry"); queryClient.invalidateQueries({ queryKey: ["requests"] }); setNotice("Your request is in. Its batch tag is ready to track."); }}/>}
+    {modal === "dispute" && <DisputeModal requests={requests} onClose={() => setModal(null)} onCreated={() => { setModal(null); queryClient.invalidateQueries({ queryKey: ["requests"] }); setNotice("Your report is with the laundry team now."); }}/>}
+    {detailRequest && <RequestDetailsModal request={detailRequest} onClose={() => setDetailRequest(null)}/>}
   </div>;
 }
-function NavButton({ active, icon, label, onClick, count }) { return <button className={`nav-item ${active ? "nav-active" : ""}`} onClick={onClick}>{icon}<span>{label}</span>{count ? <b className="nav-count">{count}</b> : null}</button>; }
-function Login({ onLogin, initialError }) {
+function LoginScreen({ onSuccess }) {
     const [email, setEmail] = useState("student@washday.demo");
     const [password, setPassword] = useState("washday123");
-    const [busy, setBusy] = useState(false);
-    const [error, setError] = useState(initialError);
-    const submit = async (event) => { event.preventDefault(); setBusy(true); setError(""); try {
-        const result = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
-        onLogin(result.user);
-    }
-    catch (reason) {
-        setError(reason.message);
-    }
-    finally {
-        setBusy(false);
-    } };
-    return <div className="login-screen"><div className="login-card"><div className="brand login-brand"><span className="brand-mark"><Droplets size={18}/></span>Washday<span className="brand-dot">.</span></div><div className="login-art"><div className="sun-shape"/><div className="laundry-basket"><span /><span /><span /><span /></div><span className="art-sparkle sparkle-one">✦</span><span className="art-sparkle sparkle-two">✦</span><span className="art-caption">A calmer laundry day starts here.</span></div><div className="login-copy"><div className="eyebrow">HOSTEL LAUNDRY, WITHOUT THE GUESSWORK</div><h1>Everything in its place.</h1><p>Follow your laundry from pickup to handover, with clear updates whenever something needs attention.</p></div><form className="login-form" onSubmit={submit}><label>Email address<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required/></label><label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required/></label>{error && <div className="form-error"><AlertCircle size={14}/>{error}</div>}<button className="button button-primary login-submit" disabled={busy}>{busy ? "Signing you in…" : "Sign in"}</button></form><div className="demo-access"><span>DEMO ACCESS</span><button type="button" onClick={() => { setEmail("student@washday.demo"); setPassword("washday123"); }}>Student</button><button type="button" onClick={() => { setEmail("staff@washday.demo"); setPassword("washday123"); }}>Laundry staff</button><small>password <code>washday123</code></small></div><div className="login-foot"><span><ShieldCheck size={13}/> Private by default</span><span>Local demo</span></div></div></div>;
+    const [validationError, setValidationError] = useState("");
+    const mutation = useMutation({ mutationFn: (body) => api("/api/auth/login", { method: "POST", body: JSON.stringify(body) }), onSuccess });
+    const login = (event) => {
+        event.preventDefault();
+        setValidationError("");
+        const parsed = loginSchema.safeParse({ email, password });
+        if (!parsed.success) {
+            setValidationError(parsed.error.issues[0]?.message ?? "Review your login details.");
+            return;
+        }
+        mutation.mutate(parsed.data);
+    };
+    return <main className="login-screen"><div className="login-card"><a className="brand login-brand" href="#"><span className="brand-mark"><Droplets size={21} strokeWidth={2.6}/></span><span>washday<span className="brand-dot">.</span></span></a><div className="login-art"><div className="sun-shape"/><div className="laundry-basket"><span /><span /><span /><span /></div><div className="art-sparkle sparkle-one">✳</div><div className="art-sparkle sparkle-two">✦</div><span className="art-caption">A softer kind of laundry day</span></div><div className="login-copy"><div className="eyebrow">HOSTEL LAUNDRY, WITHOUT THE GUESSWORK</div><h1>Good laundry days<br />start right here.</h1><p>Know where your clothes are, when they’ll be ready, and what happens if something goes wrong.</p></div>
+    <form className="login-form" onSubmit={login}><label>Email address<input autoComplete="username" type="email" value={email} onChange={(event) => setEmail(event.target.value)} required/></label><label>Password<input autoComplete="current-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} required minLength={8}/></label>{(validationError || mutation.error) && <div className="form-error"><CircleHelp size={15}/>{validationError || mutation.error.message}</div>}<button className="button button-primary login-submit" disabled={mutation.isPending}>{mutation.isPending ? <span className="spinner spinner-light"/> : <>Sign in <ArrowRight size={16}/></>}</button></form>
+    <div className="demo-access"><span>DEMO ACCOUNTS</span><button onClick={() => { setEmail("student@washday.demo"); setPassword("washday123"); }}>Student <ArrowDownRight size={13}/></button><button onClick={() => { setEmail("staff@washday.demo"); setPassword("washday123"); }}>Laundry staff <ArrowDownRight size={13}/></button><small>Both use <code>washday123</code></small></div><div className="login-foot"><span><ShieldCheck size={14}/>Private student & staff workspaces</span><span>© Washday 2026</span></div></div></main>;
 }
-function Overview({ user, requests, openDisputes, isStaff, onCreate, onRequests, onIssues, onSelect }) {
-    const active = requests[0];
-    const delivered = requests.filter((request) => request.status === "DELIVERED").length;
-    const ready = requests.filter((request) => request.status === "READY").length;
-    return <><div className="page-heading"><div><div className="eyebrow">{isStaff ? "LAUNDRY OPERATIONS" : "YOUR LAUNDRY SPACE"}</div><h1>{isStaff ? "Keep every batch moving." : `Good morning, ${user.name.split(" ")[0]}.`}</h1><p>{isStaff ? "A clean queue, clear ownership, and fewer unresolved reports." : "Here is the latest on your laundry and any reports you have raised."}</p></div>{!isStaff && <button className="button button-primary create-button" onClick={onCreate}><Plus size={15}/> New collection</button>}</div><div className="metrics-grid"><Metric icon={<Shirt size={16}/>} label={isStaff ? "Active batches" : "Active batches"} value={requests.filter((request) => request.status !== "DELIVERED").length} note={isStaff ? "Across all hostels" : "Currently in the queue"} tone="blue"/><Metric icon={<Check size={16}/>} label="Ready for handover" value={ready} note={ready ? "Ready to collect" : "Nothing waiting"} tone="green"/><Metric icon={<FileWarning size={16}/>} label="Open reports" value={openDisputes} note={openDisputes ? "Needs a response" : "All clear"} tone="amber"/></div><div className="home-grid"><section className="panel current-panel"><div className="panel-header"><div><div className="panel-kicker">{isStaff ? "QUEUE SNAPSHOT" : "CURRENT BATCH"}</div><h2>{active ? active.batchTag : "No active laundry yet"}</h2></div>{active && <Badge status={active.status}/>}</div>{active ? <><div className="request-summary"><div className="laundry-glyph"><Shirt size={18}/></div><div className="request-summary-copy"><strong>{active.studentName} <span>· {active.hostel} · {active.room}</span></strong><span><Clock3 size={11}/> Due back {formatDate(active.expectedAt, true)} <i /></span></div><button className="icon-button arrow-link" onClick={() => onSelect(active)} aria-label="View batch"><ChevronRight size={15}/></button></div><Timeline status={active.status}/><div className="timeline-hint"><span className="timeline-hint-dot"/>{active.status === "DELIVERED" ? "This batch has been handed back." : `Next step: ${stageLabels[stages[Math.min(stages.indexOf(active.status) + 1, stages.length - 1)]]}`}<span className="timeline-tag">{itemSummary(active.items)}</span></div><button className="button button-secondary full-width" onClick={() => onSelect(active)}>View batch details <ChevronRight size={14}/></button></> : <EmptyState icon={<Shirt size={21}/>} title={isStaff ? "The queue is clear" : "No collection requests yet"} copy={isStaff ? "New student collections will appear here." : "Create your first collection and we will take it from there."} action={!isStaff ? "Create collection" : undefined} onAction={onCreate}/>}</section><section className="panel side-panel"><div className="panel-header"><div><div className="panel-kicker">NEXT ON THE CALENDAR</div><h2>{active ? "Your next handover" : "A little planning"}</h2></div><div className="panel-soft-icon"><Clock3 size={15}/></div></div>{active ? <><div className="schedule-card"><div className="schedule-date"><span>{new Date(active.expectedAt).getDate()}</span><small>{new Intl.DateTimeFormat("en-IN", { month: "short" }).format(new Date(active.expectedAt)).toUpperCase()}</small></div><div className="schedule-info"><strong>Expected handover</strong><span>{formatDate(active.expectedAt, true)}</span><Badge status={active.status}/></div></div><div className="schedule-row"><div className="schedule-icon"><House size={14}/></div><div><strong>{active.hostel}</strong><span>Return location · {active.room}</span></div><ChevronRight className="schedule-arrow" size={14}/></div><div className="assurance"><span className="assurance-check"><Check size={11}/></span><span><strong>On track</strong> Last updated today</span></div></> : <EmptyState icon={<Clock3 size={20}/>} title="No dates to remember" copy="Your collection timeline will appear here."/>}</section></div><div className="lower-grid"><section className="panel history-panel"><div className="panel-header"><div><div className="panel-kicker">RECENT COLLECTIONS</div><h2>History at a glance</h2></div><button className="text-button" onClick={onRequests}>View all <ChevronRight size={12}/></button></div><div className="compact-list">{requests.slice(0, 3).map((request) => <div className="compact-row" key={request.id}><div className="compact-icon"><Shirt size={14}/></div><div className="compact-info"><strong>{request.batchTag} <span>· {formatDate(request.createdAt)}</span></strong><span>{itemSummary(request.items)}</span></div><Badge status={request.status}/></div>)}{requests.length === 0 && <div className="quiet-empty">Your completed and active collections will show here.</div>}</div></section><section className="panel update-panel"><div className="panel-header"><div><div className="panel-kicker">LATEST UPDATE</div><h2>{openDisputes ? "A report needs attention" : "Everything looks good"}</h2></div><div className="panel-soft-icon"><FileWarning size={14}/></div></div>{openDisputes ? <div className="latest-report"><div className="report-title"><span className="report-bullet"/>{requests.flatMap((request) => request.disputes).find((dispute) => dispute.status !== "RESOLVED")?.type}<Badge status="INVESTIGATING"/><p>{requests.flatMap((request) => request.disputes).find((dispute) => dispute.status !== "RESOLVED")?.description}</p><button className="text-button" onClick={onIssues}>Open reports <ChevronRight size={12}/></button></div></div> : <div className="no-reports"><div className="no-report-check"><Check size={14}/></div><strong>No reports open</strong><p>We will keep an eye on every batch so you do not have to.</p><button className="text-button" onClick={onIssues}>View report history <ChevronRight size={12}/></button></div>}</section></div><div className="hint-strip"><HelpCircle size={14}/><span>Need help? Ask the laundry desk about pickup windows or tag a missing item after handover.</span><span className="hint-sticker">WE ARE HERE</span></div><div className="page-footer"><span>Washday local demo</span><span><span className="footer-dot"/> Data is stored locally</span></div></>;
+function Overview({ user, requests, disputes, activeRequests, readyCount, openDisputes, latestRequest, isStaff, onTab, onModal, onAdvance, busy }) {
+    const inProgress = requests.filter((request) => !["DELIVERED", "READY"].includes(request.status)).length;
+    const metrics = isStaff ? [
+        { label: "Bags in progress", number: inProgress, note: "Across all hostels", icon: WashingMachine, tone: "metric-blue", change: "Live queue" },
+        { label: "Ready for handover", number: readyCount, note: "Waiting at the desk", icon: PackageCheck, tone: "metric-green", change: "Needs pickup" },
+        { label: "Open reports", number: openDisputes, note: "Awaiting a resolution", icon: FileWarning, tone: "metric-amber", change: "View reports" },
+    ] : [
+        { label: "In the laundry", number: activeRequests.filter((request) => !["READY"].includes(request.status)).length, note: "Moving through the wash", icon: WashingMachine, tone: "metric-blue", change: "On the way" },
+        { label: "Ready to collect", number: readyCount, note: "At the laundry desk", icon: PackageCheck, tone: "metric-green", change: "Pick it up" },
+        { label: "Reports in progress", number: openDisputes, note: "Your issue has a trail", icon: FileWarning, tone: "metric-amber", change: "See updates" },
+    ];
+    const latestDispute = disputes[0];
+    return <>
+    <section className="metrics-grid">{metrics.map(({ label, number, note, icon: Icon, tone, change }, index) => <button key={label} className={`metric-card ${tone}`} onClick={() => onTab(isStaff ? index === 2 ? "disputes" : "operations" : index === 2 ? "help" : "laundry")}><div className="metric-top"><span>{label}</span><Icon size={18}/></div><div className="metric-value">{number}<span className="metric-note">{note}</span></div><div className="metric-bottom"><span className="metric-sparkline">{index === 0 ? "⌁⌁⌁⌁⌁" : index === 1 ? "⌁⌁⌁" : "⌁⌁⌁⌁"}</span><span>{change}<ArrowUpRight size={13}/></span></div></button>)}</section>
+    <section className="home-grid">
+      <div className="panel current-panel"><div className="panel-header"><div><div className="panel-kicker">{isStaff ? "NEXT UP IN THE QUEUE" : "YOUR LATEST BAG"}</div><h2>{latestRequest ? `${latestRequest.batchTag} is ${latestRequest.status === "READY" ? "ready" : latestRequest.status === "DELIVERED" ? "back with you" : "on the move"}` : "Your laundry journey starts here"}</h2></div>{latestRequest && <Badge tone={statusTone(latestRequest.status)}>{stageLabels[latestRequest.status]}</Badge>}</div>
+        {latestRequest ? <><div className="request-summary"><div className="laundry-glyph"><Shirt size={22}/></div><div className="request-summary-copy"><strong>{latestRequest.studentName} <span>· {latestRequest.room}</span></strong><span>{latestRequest.batchTag} <i /> {quantityLabel(latestRequest)} items <i /> {latestRequest.hostel}</span></div><button className="icon-button arrow-link" aria-label="View laundry details" onClick={() => onTab(isStaff ? "operations" : "laundry")}><ArrowRight size={18}/></button></div><LaundryTimeline status={latestRequest.status} expectedAt={latestRequest.expectedAt}/>{isStaff && <button className="button button-secondary full-width" disabled={busy || latestRequest.status === "DELIVERED"} onClick={() => onAdvance(latestRequest)}>{latestRequest.status === "DELIVERED" ? "Completed" : `Move to ${stageLabels[stages[stages.indexOf(latestRequest.status) + 1]]}`}<ArrowRight size={15}/></button>}</> : <div className="empty-card"><span className="empty-illustration"><Shirt size={25}/></span><strong>No bags in the wash yet</strong><span>Book a collection and keep track from the first pickup.</span>{!isStaff && <button className="text-button" onClick={() => onModal("request")}>Schedule a collection <ArrowRight size={14}/></button>}</div>}
+      </div>
+      <div className="panel side-panel"><div className="panel-header"><div><div className="panel-kicker">{isStaff ? "TODAY AT THE DESK" : "THE LITTLE DETAILS"}</div><h2>{isStaff ? "Laundry desk" : "Pickup & drop-off"}</h2></div><span className="panel-soft-icon"><Clock3 size={18}/></span></div>
+        <div className="schedule-card"><div className="schedule-date"><span>{latestRequest ? dateLabel(latestRequest.pickupAt).split(" ")[0] : "—"}</span><small>{latestRequest ? dateLabel(latestRequest.pickupAt).split(" ").slice(1).join(" ").toUpperCase() : "NO PICKUP"}</small></div><div className="schedule-info"><strong>{latestRequest ? "Collection window" : "Collection window"}</strong><span>{latestRequest ? dateLabel(latestRequest.pickupAt, true) : "Choose a time that works for you"}</span><Badge tone={latestRequest ? "green" : "neutral"}>{latestRequest ? "Scheduled" : "Not booked"}</Badge></div></div>
+        <div className="schedule-row"><span className="schedule-icon"><PackageCheck size={16}/></span><div><strong>{latestRequest ? "Expected back" : "Clear return times"}</strong><span>{latestRequest ? dateLabel(latestRequest.expectedAt, true) : "See an ETA before clothes leave your hands."}</span></div><span className="schedule-arrow"><ArrowRight size={15}/></span></div>
+        <div className="assurance"><div className="assurance-check"><Check size={14}/></div><span><strong>A tag stays with your bag</strong>Each batch has its own tracking ID.</span></div>
+        {!isStaff && <button className="button button-primary full-width schedule-cta" onClick={() => onModal("request")}><Plus size={16}/>Plan a collection</button>}
+      </div>
+    </section>
+    <section className="lower-grid"><div className="panel history-panel"><div className="panel-header"><div><div className="panel-kicker">{isStaff ? "THE LATEST MOVEMENT" : "A LITTLE HISTORY"}</div><h2>{isStaff ? "Recently updated" : "Recent laundry"}</h2></div><button className="text-button" onClick={() => onTab(isStaff ? "operations" : "laundry")}>See all <ArrowRight size={14}/></button></div>
+        {requests.length ? <div className="compact-list">{requests.slice(0, 3).map((request) => <div className="compact-row" key={request.id}><span className="compact-icon"><Shirt size={17}/></span><div className="compact-info"><strong>{request.batchTag}<span> · {quantityLabel(request)} items</span></strong><span>{isStaff ? `${request.studentName} · Room ${request.room}` : `${dateLabel(request.createdAt)} · ${request.hostel}`}</span></div><Badge tone={statusTone(request.status)}>{stageLabels[request.status]}</Badge></div>)}</div> : <div className="quiet-empty">Your past collections will appear here.</div>}
+      </div><div className="panel update-panel"><div className="panel-header"><div><div className="panel-kicker">{isStaff ? "NEEDS A HUMAN TOUCH" : "WE’RE HERE IF YOU NEED US"}</div><h2>{isStaff ? "Latest report" : "Reports & resolution"}</h2></div><span className="panel-soft-icon"><CircleHelp size={18}/></span></div>
+        {latestDispute ? <div className="latest-report"><div className="report-title"><span className="report-bullet"/>{latestDispute.issueType}<Badge tone={statusTone(latestDispute.status)}>{latestDispute.status.toLowerCase()}</Badge></div><p>{latestDispute.itemName} · {latestDispute.request.batchTag}</p><span className="report-date">Opened {dateLabel(latestDispute.createdAt)}</span><button className="text-button" onClick={() => onTab(isStaff ? "disputes" : "help")}>View investigation <ArrowRight size={14}/></button></div> : <div className="no-reports"><span className="no-report-check"><CheckCircle2 size={19}/></span><strong>Nothing to report</strong><p>If something’s missing or damaged, tell us here and we’ll follow it through.</p><button className="text-button" onClick={() => onModal("dispute")}>Report an issue <ArrowRight size={14}/></button></div>}
+      </div></section>
+    <div className="hint-strip"><Sparkles size={15}/><span>{isStaff ? "A clear batch tag helps keep every item with its owner." : "A little more certainty for a day that already has enough surprises."}</span><span className="hint-sticker">WASH · RINSE · RETURN</span></div>
+  </>;
 }
-function Metric({ icon, label, value, note, tone }) { return <div className={`metric-card metric-${tone}`}><div className="metric-top"><span>{label}</span>{icon}</div><div className="metric-value">{value}<span className="metric-note">{note}</span></div><div className="metric-bottom"><span>Updated just now</span><span className="metric-sparkline">⌁⌁</span></div></div>; }
-function Badge({ status }) { const tone = status === "DELIVERED" || status === "RESOLVED" ? "green" : status === "READY" || status === "INVESTIGATING" ? "amber" : status === "REQUESTED" || status === "OPEN" ? "blue" : "neutral"; return <span className={`badge badge-${tone}`}><i />{status.toLowerCase().replace("_", " ")}</span>; }
-function Timeline({ status }) { const current = stages.indexOf(status); return <div className="timeline-wrap"><div className="timeline-head"><span>PROCESSING PROGRESS</span><span>{current + 1} of {stages.length} steps</span></div><div className="timeline">{stages.map((stage, index) => <div className={`timeline-step ${index < current ? "step-done" : ""} ${index === current ? "step-current" : ""}`} key={stage}><span className="timeline-node"><i /></span><span className="timeline-label">{stageLabels[stage]}</span></div>)}</div></div>; }
-function EmptyState({ icon, title, copy, action, onAction }) { return <div className="empty-card"><div className="empty-illustration">{icon}</div><strong>{title}</strong><span>{copy}</span>{action && <button className="text-button" onClick={onAction}>{action} <ChevronRight size={12}/></button>}</div>; }
-function RequestsPage({ requests, isStaff, onCreate, onSelect, onRefresh, setNotice }) {
+function LaundryTimeline({ status, expectedAt }) {
+    const current = stages.indexOf(status);
+    return <div className="timeline-wrap"><div className="timeline-head"><span>PROCESSING JOURNEY</span><span>{status === "DELIVERED" ? "Finished" : `Expected ${dateLabel(expectedAt, true)}`}</span></div><div className="timeline">{stages.map((stage, index) => <div key={stage} className={`timeline-step ${index < current ? "step-done" : ""} ${index === current ? "step-current" : ""}`}><span className="timeline-node">{index < current ? <Check size={11}/> : <i />}</span><span className="timeline-label">{stageLabels[stage]}</span></div>)}</div><div className="timeline-hint"><span className="timeline-hint-dot"/>{stageHints[status]} <span className="timeline-tag">Tagged · in view</span></div></div>;
+}
+function LaundryList({ requests, isStaff, onSelect, onAdvance, busy }) {
     const [search, setSearch] = useState("");
     const [filter, setFilter] = useState("ALL");
-    const visible = requests.filter((request) => `${request.batchTag} ${request.studentName} ${request.hostel}`.toLowerCase().includes(search.toLowerCase()) && (filter === "ALL" || request.status === filter));
-    return <><div className="page-heading"><div><div className="eyebrow">{isStaff ? "WORK QUEUE" : "YOUR HISTORY"}</div><h1>{isStaff ? "Operations queue" : "My laundry"}</h1><p>{isStaff ? "Move each batch forward and keep students in the loop." : "Every collection, tag, and expected return in one place."}</p></div>{!isStaff && <button className="button button-primary create-button" onClick={onCreate}><Plus size={15}/> New collection</button>}</div><section className="panel table-panel"><div className="table-toolbar"><div><div className="panel-kicker">{visible.length} {visible.length === 1 ? "BATCH" : "BATCHES"}</div><h2>Collection history</h2></div><div className="table-controls"><label className="search-box"><Search size={13}/><input placeholder="Search batches" value={search} onChange={(event) => setSearch(event.target.value)}/></label><label className="select-wrap"><select value={filter} onChange={(event) => setFilter(event.target.value)}><option value="ALL">All stages</option>{stages.map((stage) => <option key={stage} value={stage}>{stageLabels[stage]}</option>)}</select></label></div></div>{visible.length ? <div className="request-table-wrap"><table className="request-table"><thead><tr><th>BATCH</th><th>{isStaff ? "STUDENT" : "ITEMS"}</th><th>COLLECTED</th><th>EXPECTED BACK</th><th>STATUS</th><th /></tr></thead><tbody>{visible.map((request) => <tr key={request.id}><td><div className="batch-cell"><div className="table-icon"><Shirt size={14}/></div><div><strong>{request.batchTag}</strong><span>{request.hostel} · {request.room}</span></div></div></td><td><strong>{isStaff ? request.studentName : itemSummary(request.items)}</strong><small>{isStaff ? request.studentId : request.notes || "No special notes"}</small></td><td>{formatDate(request.pickupAt, true)}</td><td>{formatDate(request.expectedAt, true)}</td><td><Badge status={request.status}/></td><td>{isStaff && request.status !== "DELIVERED" ? <AdvanceButton request={request} onRefresh={onRefresh} setNotice={setNotice}/> : <button className="icon-button row-open" onClick={() => onSelect(request)} aria-label="Open batch"><ChevronRight size={14}/></button>}</td></tr>)}</tbody></table></div> : <EmptyState icon={<Search size={20}/>} title="No matching batches" copy="Try a different search or start a new collection." action={!isStaff ? "Create collection" : undefined} onAction={onCreate}/>}</section><div className="page-footer"><span>Showing {visible.length} of {requests.length} batches</span><span>Local records only</span></div></>;
+    const filtered = requests.filter((request) => {
+        const query = search.toLowerCase();
+        const matchesSearch = `${request.batchTag} ${request.studentName} ${request.room} ${request.hostel}`.toLowerCase().includes(query);
+        return matchesSearch && (filter === "ALL" || request.status === filter);
+    });
+    return <section className="panel table-panel"><div className="table-toolbar"><div><div className="panel-kicker">{isStaff ? "ALL HOSTELS · EVERY ACTIVE BATCH" : "YOUR COLLECTIONS · EVERY ITEM ACCOUNTED FOR"}</div><h2>{isStaff ? "Batch tracker" : "Laundry requests"}</h2></div><div className="table-controls"><label className="search-box"><Search size={15}/><input placeholder={isStaff ? "Search batch or student" : "Search your laundry"} value={search} onChange={(event) => setSearch(event.target.value)}/></label><div className="select-wrap"><select value={filter} onChange={(event) => setFilter(event.target.value)} aria-label="Filter laundry by status"><option value="ALL">All stages</option>{stages.map((stage) => <option value={stage} key={stage}>{stageLabels[stage]}</option>)}</select><ChevronDown size={14}/></div></div></div>
+    {filtered.length ? <div className="request-table-wrap"><table className="request-table"><thead><tr><th>BATCH / STUDENT</th><th>ITEMS</th><th>COLLECTED</th><th>EXPECTED BACK</th><th>STAGE</th><th>{isStaff ? "UPDATE" : ""}</th></tr></thead><tbody>{filtered.map((request) => <tr key={request.id}><td><div className="batch-cell"><span className="table-icon"><Shirt size={16}/></span><div><strong>{request.batchTag}</strong><span>{isStaff ? `${request.studentName} · Room ${request.room}` : request.hostel}</span></div></div></td><td><strong>{quantityLabel(request)} pieces</strong><small>{itemList(request.items).map((item) => item.name).join(", ")}</small></td><td>{dateLabel(request.pickupAt)}</td><td><strong>{dateLabel(request.expectedAt)}</strong><small>{dateLabel(request.expectedAt, true).split(", ").slice(-1)}</small></td><td><Badge tone={statusTone(request.status)}>{stageLabels[request.status]}</Badge></td><td>{isStaff && request.status !== "DELIVERED" ? <button className="advance-button" disabled={busy} onClick={() => onAdvance(request)}>{stages[stages.indexOf(request.status) + 1] === "DELIVERED" ? "Deliver" : "Advance"}<ArrowRight size={13}/></button> : isStaff ? <span className="delivered-mark"><CheckCircle2 size={16}/>Done</span> : <button className="icon-button row-open" title="View this batch" aria-label={`View batch ${request.batchTag}`} onClick={() => onSelect(request)}><ChevronRight size={17}/></button>}</td></tr>)}</tbody></table></div> : <div className="empty-table"><span className="empty-illustration"><Search size={22}/></span><strong>No laundry found</strong><span>Try another name or stage.</span></div>}
+    <div className="table-foot"><span>Showing {filtered.length} of {requests.length} batches</span><span>{isStaff ? "Advance a batch as it moves through the laundry." : "Batch tags and return times stay attached to each request."}</span></div>
+  </section>;
 }
-function AdvanceButton({ request, onRefresh, setNotice }) { const [busy, setBusy] = useState(false); const index = stages.indexOf(request.status); const next = stages[index + 1]; const advance = async () => { setBusy(true); try {
-    await api(`/api/requests/${request.id}`, { method: "PATCH", body: JSON.stringify({ status: next }) });
-    await onRefresh();
-    setNotice(`Batch ${request.batchTag} moved to ${stageLabels[next]}.`);
+function DisputeDesk({ disputes, isStaff, onModal, onUpdate, busy }) {
+    const [resolutionText, setResolutionText] = useState({});
+    return <section className="dispute-layout"><div className="dispute-main"><div className="panel dispute-panel"><div className="table-toolbar"><div><div className="panel-kicker">{isStaff ? "FOLLOW EACH REPORT THROUGH" : "YOUR CONCERNS HAVE A PAPER TRAIL"}</div><h2>{isStaff ? "Investigation queue" : "Your reports"}</h2></div>{!isStaff && <button className="button button-primary" onClick={onModal}><Plus size={16}/>Report an issue</button>}</div>
+        {disputes.length ? <div className="case-list">{disputes.map(({ id, status, issueType, itemName, description, resolution, createdAt, request }) => <article className="case-card" key={id}><div className="case-top"><span className="case-symbol"><FileWarning size={18}/></span><div className="case-title"><strong>{issueType}<span> · {itemName}</span></strong><small>{request.batchTag} <i /> {request.studentName} · Room {request.room}</small></div><Badge tone={statusTone(status)}>{status.toLowerCase()}</Badge></div><p className="case-description">{description}</p>{resolution && <div className="resolution-note"><span><Sparkles size={14}/>Staff update</span><p>{resolution}</p></div>}<div className="case-bottom"><span>Opened {dateLabel(createdAt, true)}</span>{isStaff && status !== "RESOLVED" && <div className="case-actions"><input aria-label="Investigation note" placeholder="Add an update or resolution…" value={resolutionText[id] ?? resolution} onChange={(event) => setResolutionText({ ...resolutionText, [id]: event.target.value })}/><select aria-label="Update report status" value={status} onChange={(event) => onUpdate(id, event.target.value, resolutionText[id] ?? resolution)}><option value="OPEN">Open</option><option value="INVESTIGATING">Investigating</option><option value="RESOLVED">Resolve</option></select><button className="icon-button save-case" disabled={busy} title="Save investigation update" onClick={() => onUpdate(id, status, resolutionText[id] ?? resolution)}><Check size={16}/></button></div>}{isStaff && status === "RESOLVED" && <span className="resolved-label"><CheckCircle2 size={15}/>Resolution recorded</span>}</div></article>)}</div> : <div className="empty-table"><span className="empty-illustration"><CheckCircle2 size={22}/></span><strong>No open laundry reports</strong><span>{isStaff ? "New missing or damaged item reports will appear here." : "If something comes back missing or damaged, report it here."}</span>{!isStaff && <button className="text-button" onClick={onModal}>Start a report <ArrowRight size={14}/></button>}</div>}
+      </div></div><aside className="panel resolution-sidebar"><span className="resolution-art"><span /><span /><span /></span><div className="panel-kicker">A FAIR FOLLOW-THROUGH</div><h2>{isStaff ? "Make the next step clear." : "Something not quite right?"}</h2><p>{isStaff ? "Keep updates attached to the report. Students can follow the investigation without chasing the laundry desk." : "Tell us which item and what happened. The laundry team will investigate and leave updates right here."}</p><div className="resolution-steps"><span><i>01</i>{isStaff ? "Check the batch" : "Choose your batch"}</span><span><i>02</i>{isStaff ? "Investigate & update" : "Describe the issue"}</span><span><i>03</i>{isStaff ? "Record a resolution" : "Follow the resolution"}</span></div>{!isStaff && <button className="button button-secondary full-width" onClick={onModal}><FileWarning size={15}/>Start a missing or damage report</button>}</aside></section>;
 }
-catch (reason) {
-    setNotice(reason.message);
+function RequestDetailsModal({ request, onClose }) {
+    const items = itemList(request.items);
+    return <Modal title={request.batchTag} eyebrow="BATCH DETAILS · TRACKING" onClose={onClose}><div className="details-content"><div className="details-status"><div><Badge tone={statusTone(request.status)}>{stageLabels[request.status]}</Badge><p>{stageHints[request.status]}</p></div><div className="details-tag"><PackageCheck size={19}/><span>Tagged batch</span></div></div><LaundryTimeline status={request.status} expectedAt={request.expectedAt}/><div className="details-section"><div className="panel-kicker">ITEMS IN THIS BATCH · {quantityLabel(request)} TOTAL</div>{items.map((item, index) => <div className="detail-item" key={`${item.name}-${index}`}><span className="detail-item-icon"><Shirt size={15}/></span><strong>{item.name}</strong><span>× {item.quantity}</span></div>)}</div><div className="details-grid"><div><span>Collection window</span><strong>{dateLabel(request.pickupAt, true)}</strong></div><div><span>Drop-off at laundry</span><strong>{dateLabel(request.dropOffAt, true)}</strong></div><div><span>Expected completion</span><strong>{dateLabel(request.expectedAt, true)}</strong></div><div><span>Return location</span><strong>{request.hostel} · Room {request.room}</strong></div></div>{request.notes && <div className="details-notes"><strong>Care notes</strong><p>{request.notes}</p></div>}<div className="details-created">Request opened {dateLabel(request.createdAt, true)} <span>·</span> tag stays with your laundry through handover</div><div className="modal-actions"><button className="button button-primary" onClick={onClose}>Done</button></div></div></Modal>;
 }
-finally {
-    setBusy(false);
-} }; return <button className="advance-button" onClick={advance} disabled={busy}>{busy ? "Saving…" : <>Advance <ChevronRight size={11}/></>}</button>; }
-function IssuesPage({ requests, isStaff, onCreate, onRefresh, setNotice }) { const disputes = requests.flatMap((request) => request.disputes.map((dispute) => ({ ...dispute, batchTag: request.batchTag, studentName: request.studentName, requestId: request.id }))); return <><div className="page-heading"><div><div className="eyebrow">{isStaff ? "SERVICE RECOVERY" : "KEEP US HONEST"}</div><h1>{isStaff ? "Investigations" : "My reports"}</h1><p>{isStaff ? "Follow up on missing, damaged, or delayed laundry." : "If something is not right, report it and we will investigate."}</p></div>{!isStaff && <button className="button button-primary create-button" onClick={onCreate}><Plus size={15}/> Report an issue</button>}</div><div className="dispute-layout"><section className="panel dispute-panel"><div className="table-toolbar"><div><div className="panel-kicker">{disputes.length} REPORTS</div><h2>Issue history</h2></div></div>{disputes.length ? <div className="case-list">{disputes.map((dispute) => <div className="case-card" key={dispute.id}><div className="case-top"><div className="case-symbol"><FileWarning size={16}/></div><div className="case-title"><strong>{dispute.type} <span>· {dispute.batchTag}</span></strong><small>{dispute.studentName} <i /> {formatDate(dispute.createdAt)}</small></div><Badge status={dispute.status}/></div><p className="case-description">{dispute.description}</p>{isStaff && dispute.status !== "RESOLVED" ? <StaffDisputeForm dispute={dispute} onRefresh={onRefresh} setNotice={setNotice}/> : dispute.status === "RESOLVED" ? <div className="resolution-note"><span><Check size={12}/> Resolved</span><p>{dispute.resolution || "The laundry desk marked this report resolved."}</p></div> : null}</div>)}</div> : <EmptyState icon={<Check size={20}/>} title="No reports yet" copy={isStaff ? "New student reports will appear here." : "No open issues. That is a good thing."} action={!isStaff ? "Report an issue" : undefined} onAction={onCreate}/>}</section><aside className="panel resolution-sidebar"><div className="resolution-art"><span /><span /><span /></div><div className="panel-kicker">OUR PROMISE</div><h2>Every report gets a proper follow-up.</h2><p>We keep the conversation attached to your batch so nobody has to reconstruct what happened.</p><div className="resolution-steps"><span><i>01</i> Tell us what happened</span><span><i>02</i> We investigate the batch</span><span><i>03</i> You see the resolution</span></div><button className="button button-secondary full-width" onClick={onCreate}><HelpCircle size={13}/> Need to report something?</button></aside></div></>; }
-function StaffDisputeForm({ dispute, onRefresh, setNotice }) { const [status, setStatus] = useState(dispute.status); const [resolution, setResolution] = useState(dispute.resolution); const [busy, setBusy] = useState(false); const save = async () => { setBusy(true); try {
-    await api(`/api/disputes/${dispute.id}`, { method: "PATCH", body: JSON.stringify({ status, resolution }) });
-    await onRefresh();
-    setNotice("Investigation updated.");
+function RequestModal({ user, onClose, onCreated }) {
+    const [items, setItems] = useState([{ name: "", quantity: 1 }]);
+    const [pickupAt, setPickupAt] = useState(displayDateTimeOffset(2));
+    const [dropOffAt, setDropOffAt] = useState(displayDateTimeOffset(4));
+    const [expectedAt, setExpectedAt] = useState(displayDateTimeOffset(30));
+    const [notes, setNotes] = useState("");
+    const [error, setError] = useState("");
+    const mutation = useMutation({ mutationFn: (body) => api("/api/requests", { method: "POST", body: JSON.stringify(body) }), onSuccess: onCreated, onError: (e) => setError(e.message) });
+    const submit = (event) => {
+        event.preventDefault();
+        setError("");
+        const payload = { items, pickupAt: new Date(pickupAt).toISOString(), dropOffAt: new Date(dropOffAt).toISOString(), expectedAt: new Date(expectedAt).toISOString(), notes };
+        const parsed = requestSchema.safeParse(payload);
+        if (!parsed.success) {
+            setError(parsed.error.issues[0]?.message ?? "Review the collection details.");
+            return;
+        }
+        mutation.mutate(parsed.data);
+    };
+    return <Modal title="Plan a laundry collection" eyebrow="NEW LAUNDRY REQUEST" onClose={onClose}><form className="modal-form" onSubmit={submit}><div className="profile-recap"><span className="avatar">{user.name.charAt(0)}</span><div><strong>{user.name}</strong><span>{user.hostel} · Room {user.room} · {user.studentId}</span></div><span className="verified-chip"><ShieldCheck size={13}/>Verified profile</span></div><fieldset className="form-fieldset"><legend>What’s going in the wash?</legend><p className="field-hint">Add every clothing type to this one collection. Choose a suggestion or type a custom item name, then set its quantity.</p><datalist id="laundry-item-suggestions"><option value="T-shirt"/><option value="Shirt"/><option value="Pants"/><option value="Shorts"/><option value="Jeans"/><option value="Socks"/><option value="Bedsheet"/><option value="Pillowcase"/><option value="Towel"/><option value="Hoodie"/><option value="Jacket"/><option value="Kurta"/></datalist><div className="item-form-list">{items.map((item, index) => <div className="item-form-row" key={index}><label className="field-grow">Item name<input list="laundry-item-suggestions" placeholder="Select or type e.g. T-shirt" value={item.name} onChange={(event) => setItems(items.map((entry, i) => i === index ? { ...entry, name: event.target.value } : entry))} required maxLength={60}/></label><label className="quantity-field">Qty<input aria-label={`Quantity for ${item.name || `item ${index + 1}`}`} type="number" min="1" max="99" value={item.quantity} onChange={(event) => setItems(items.map((entry, i) => i === index ? { ...entry, quantity: Number(event.target.value) } : entry))} required/></label>{items.length > 1 && <button className="icon-button remove-item" type="button" aria-label={`Remove ${item.name || `item ${index + 1}`}`} onClick={() => setItems(items.filter((_, i) => i !== index))}><X size={15}/></button>}</div>)}</div><button className="add-item" type="button" onClick={() => setItems([...items, { name: "", quantity: 1 }])}><Plus size={14}/>Add another item</button></fieldset><div className="form-two"><label>Collection window<input type="datetime-local" value={pickupAt} onChange={(event) => setPickupAt(event.target.value)} required/></label><label>Drop-off to laundry<input type="datetime-local" value={dropOffAt} onChange={(event) => setDropOffAt(event.target.value)} required/></label></div><label>Expected completion<input type="datetime-local" value={expectedAt} onChange={(event) => setExpectedAt(event.target.value)} required/><span className="field-hint">We’ll use this as your expected return time.</span></label><label>Care notes <span className="optional-label">Optional</span><textarea placeholder="Delicates, separate darks, stain to check…" rows={2} maxLength={500} value={notes} onChange={(event) => setNotes(event.target.value)}/></label><div className="form-info"><PackageCheck size={15}/>A unique batch tag will be added as soon as you submit.</div>{error && <div className="form-error"><CircleHelp size={15}/>{error}</div>}<div className="modal-actions"><button type="button" className="button button-secondary" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={mutation.isPending}>{mutation.isPending ? <span className="spinner spinner-light"/> : <>Create laundry request <ArrowRight size={15}/></>}</button></div></form></Modal>;
 }
-catch (reason) {
-    setNotice(reason.message);
+function DisputeModal({ requests, onClose, onCreated }) {
+    const eligible = requests.filter((request) => request.status === "DELIVERED" || request.status === "READY");
+    const [requestId, setRequestId] = useState(eligible[0]?.id ?? requests[0]?.id ?? "");
+    const [itemName, setItemName] = useState("");
+    const [issueType, setIssueType] = useState("Missing item");
+    const [description, setDescription] = useState("");
+    const [error, setError] = useState("");
+    const mutation = useMutation({ mutationFn: (body) => api("/api/disputes", { method: "POST", body: JSON.stringify(body) }), onSuccess: onCreated, onError: (e) => setError(e.message) });
+    const selected = requests.find((request) => request.id === requestId);
+    const submit = (event) => { event.preventDefault(); const parsed = disputeSchema.safeParse({ requestId, itemName, issueType, description }); if (!parsed.success) {
+        setError(parsed.error.issues[0]?.message ?? "Review the report.");
+        return;
+    } mutation.mutate(parsed.data); };
+    return <Modal title="Let’s make this right" eyebrow="REPORT AN ISSUE" onClose={onClose}><form className="modal-form" onSubmit={submit}><div className="report-intro"><div className="report-intro-icon"><FileWarning size={20}/></div><p>Tell us what came back differently. Your report will stay linked to its batch while we investigate.</p></div>{requests.length === 0 ? <div className="empty-report-message">You’ll need a laundry request before you can report an item. Create a request first.</div> : <><label>Which laundry batch?<select value={requestId} onChange={(event) => setRequestId(event.target.value)} required>{requests.map((request) => <option value={request.id} key={request.id}>{request.batchTag} · {request.hostel} · {stageLabels[request.status]}</option>)}</select></label><label>Item affected<input placeholder="e.g. White T-shirt" value={itemName} onChange={(event) => setItemName(event.target.value)} required maxLength={80}/>{selected && <span className="field-hint">Items in this batch: {itemList(selected.items).map((item) => item.name).join(", ")}</span>}</label><label>What happened?<select value={issueType} onChange={(event) => setIssueType(event.target.value)}><option>Missing item</option><option>Damaged item</option><option>Other</option></select></label><label>Tell us a little more<textarea rows={4} placeholder="Which item is missing or what damage did you notice?" value={description} onChange={(event) => setDescription(event.target.value)} required minLength={8} maxLength={1000}/></label></>}{error && <div className="form-error"><CircleHelp size={15}/>{error}</div>}<div className="modal-actions"><button type="button" className="button button-secondary" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={mutation.isPending || requests.length === 0}>{mutation.isPending ? <span className="spinner spinner-light"/> : <>Send report <ArrowRight size={15}/></>}</button></div></form></Modal>;
 }
-finally {
-    setBusy(false);
-} }; return <div className="case-bottom"><span>Update investigation</span><div className="case-actions"><input placeholder="Resolution note" value={resolution} onChange={(event) => setResolution(event.target.value)}/><select value={status} onChange={(event) => setStatus(event.target.value)}><option value="OPEN">Open</option><option value="INVESTIGATING">Investigating</option><option value="RESOLVED">Resolved</option></select><button className="icon-button save-case" onClick={save} disabled={busy} aria-label="Save investigation"><Check size={14}/></button></div></div>; }
-function RequestDetails({ request, onClose, onReport }) { let items = []; try {
-    items = JSON.parse(request.items);
+function Modal({ title, eyebrow, onClose, children }) {
+    return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget)
+        onClose(); }}><section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title"><header className="modal-header"><div><div className="panel-kicker">{eyebrow}</div><h2 id="modal-title">{title}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close dialog"><X size={19}/></button></header>{children}</section></div>;
 }
-catch { /* old records */ } return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget)
-    onClose(); }}><div className="modal-card"><div className="modal-header"><div><div className="panel-kicker">BATCH DETAILS</div><h2>{request.batchTag}</h2></div><button className="icon-button" aria-label="Close" onClick={onClose}><X size={16}/></button></div><div className="details-content"><div className="details-status"><div><Badge status={request.status}/><p>Expected back {formatDate(request.expectedAt, true)}</p></div><div className="details-tag"><Droplets size={21}/><span>TAGGED BATCH</span></div></div><Timeline status={request.status}/><div className="details-section"><div className="panel-kicker">ITEMS IN THIS BATCH</div>{items.map((item) => <div className="detail-item" key={item.name}><Shirt size={14}/><strong>{item.name}</strong><span>× {item.quantity}</span></div>)}</div><div className="details-grid"><div><span>Collection</span><strong>{formatDate(request.pickupAt, true)}</strong></div><div><span>Return location</span><strong>{request.hostel} · {request.room}</strong></div><div><span>Drop-off</span><strong>{formatDate(request.dropOffAt, true)}</strong></div><div><span>Student</span><strong>{request.studentName}</strong></div></div>{request.notes && <div className="details-notes"><strong>Care notes</strong><p>{request.notes}</p></div>}<div className="details-created">Created {formatDate(request.createdAt)} <span>·</span> {request.disputes.length} report{request.disputes.length === 1 ? "" : "s"}</div><button className="button button-secondary full-width" onClick={onReport}><FileWarning size={14}/> Report an issue with this batch</button></div></div></div>; }
-function RequestModal({ onClose, onSaved }) { const [items, setItems] = useState([{ name: "", quantity: 1 }]); const [pickupAt, setPickupAt] = useState(() => new Date(Date.now() + 60 * 60 * 1000).toISOString().slice(0, 16)); const [dropOffAt, setDropOffAt] = useState(() => new Date(Date.now() + 25 * 60 * 60 * 1000).toISOString().slice(0, 16)); const [expectedAt, setExpectedAt] = useState(() => new Date(Date.now() + 49 * 60 * 60 * 1000).toISOString().slice(0, 16)); const [notes, setNotes] = useState(""); const [error, setError] = useState(""); const [busy, setBusy] = useState(false); const save = async (event) => { event.preventDefault(); setBusy(true); setError(""); try {
-    await api("/api/requests", { method: "POST", body: JSON.stringify({ items, pickupAt, dropOffAt, expectedAt, notes }) });
-    await onSaved();
-}
-catch (reason) {
-    setError(reason.message);
-    setBusy(false);
-} }; return <Modal title="Start a new collection" kicker="NEW COLLECTION" onClose={onClose}><form className="modal-form" onSubmit={save}><div className="profile-recap"><div className="avatar">✦</div><div><strong>Your laundry profile</strong><span>Collection details are linked to your hostel room.</span></div><span className="verified-chip"><ShieldCheck size={12}/> Verified</span></div><fieldset className="form-fieldset"><legend>Items to collect</legend><div className="item-form-list">{items.map((item, index) => <div className="item-form-row" key={index}><label className="field-grow">Item name<input required placeholder="e.g. T-shirts" value={item.name} onChange={(event) => setItems(items.map((current, itemIndex) => itemIndex === index ? { ...current, name: event.target.value } : current))}/></label><label className="quantity-field">Qty<input type="number" min={1} max={99} required value={item.quantity} onChange={(event) => setItems(items.map((current, itemIndex) => itemIndex === index ? { ...current, quantity: Number(event.target.value) } : current))}/></label>{items.length > 1 && <button type="button" className="icon-button remove-item" onClick={() => setItems(items.filter((_, itemIndex) => itemIndex !== index))} aria-label="Remove item"><X size={14}/></button>}</div>)}</div><button type="button" className="add-item" onClick={() => setItems([...items, { name: "", quantity: 1 }])}><Plus size={12}/> Add another item</button></fieldset><div className="form-two"><label>Collection time<input type="datetime-local" value={pickupAt} onChange={(event) => setPickupAt(event.target.value)} required/></label><label>Drop-off time<input type="datetime-local" value={dropOffAt} onChange={(event) => setDropOffAt(event.target.value)} required/></label></div><label>Expected back<input type="datetime-local" value={expectedAt} onChange={(event) => setExpectedAt(event.target.value)} required/><span className="field-hint">We will show this estimate on your batch timeline.</span></label><label>Care notes <span className="optional-label">(optional)</span><textarea rows={3} placeholder="Anything the laundry desk should know?" value={notes} onChange={(event) => setNotes(event.target.value)}/></label>{error && <div className="form-error"><AlertCircle size={14}/>{error}</div>}<div className="modal-actions"><button type="button" className="button button-secondary" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={busy}>{busy ? "Creating…" : "Create collection"}</button></div></form></Modal>; }
-function DisputeModal({ request, onClose, onSaved }) { const [type, setType] = useState("Missing item"); const [description, setDescription] = useState(""); const [error, setError] = useState(""); const [busy, setBusy] = useState(false); const save = async (event) => { event.preventDefault(); setBusy(true); setError(""); try {
-    await api("/api/disputes", { method: "POST", body: JSON.stringify({ requestId: request.id, type, description }) });
-    await onSaved();
-}
-catch (reason) {
-    setError(reason.message);
-    setBusy(false);
-} }; return <Modal title="Report an issue" kicker="SERVICE REPORT" onClose={onClose}><form className="modal-form" onSubmit={save}><div className="report-intro"><div className="report-intro-icon"><FileWarning size={15}/></div><p>This report will stay attached to <strong>{request.batchTag}</strong> so the laundry team can investigate the right batch.</p></div><label>Issue type<select value={type} onChange={(event) => setType(event.target.value)}><option>Missing item</option><option>Damaged item</option><option>Delayed return</option><option>Other</option></select></label><label>What happened?<textarea rows={5} minLength={8} required placeholder="Tell us what you noticed…" value={description} onChange={(event) => setDescription(event.target.value)}/></label>{error && <div className="form-error"><AlertCircle size={14}/>{error}</div>}<div className="modal-actions"><button type="button" className="button button-secondary" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={busy}>{busy ? "Sending…" : "Send report"}</button></div></form></Modal>; }
-function Modal({ title, kicker, onClose, children }) { return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget)
-    onClose(); }}><div className="modal-card"><div className="modal-header"><div><div className="panel-kicker">{kicker}</div><h2>{title}</h2></div><button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X size={16}/></button></div>{children}</div></div>; }
