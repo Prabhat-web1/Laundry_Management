@@ -3,13 +3,11 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
-}
-
-enum UserRole {
-  STUDENT
-  STAFF
+  provider  = "postgresql"
+  // Pooled connection string used by the running app (Vercel / serverless).
+  url       = env("DATABASE_URL")
+  // Direct (non-pooled) connection string used by Prisma Migrate.
+  directUrl = env("DIRECT_URL")
 }
 
 enum LaundryStatus {
@@ -27,68 +25,71 @@ enum DisputeStatus {
   RESOLVED
 }
 
+enum UserRole {
+  STUDENT
+  STAFF
+}
+
 model User {
   id           String    @id @default(cuid())
+  name         String
   email        String    @unique
   passwordHash String
-  name         String
   role         UserRole  @default(STUDENT)
-  studentId    String?
-  room         String?
-  hostel       String?
-  phone        String?
+  studentId    String?   @unique
+  room         String    @default("")
+  hostel       String    @default("")
+  phone        String    @default("")
   sessions     Session[]
   requests     LaundryRequest[]
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
 }
 
 model Session {
   id        String   @id @default(cuid())
   tokenHash String   @unique
   userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
   createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId])
+  @@index([expiresAt])
 }
 
 model LaundryRequest {
-  id          String        @id @default(cuid())
-  studentName String
-  studentId   String
-  userId      String
-  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  room        String
-  hostel      String
-  phone       String
-  items       String
-  pickupAt    DateTime
-  dropOffAt   DateTime
-  expectedAt  DateTime
-  notes       String        @default("")
-  batchTag    String        @unique
-  status      LaundryStatus @default(REQUESTED)
-  disputes    Dispute[]
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  id           String        @id @default(cuid())
+  studentName  String
+  studentId    String
+  userId       String
+  room         String
+  hostel       String
+  phone        String
+  items        String
+  pickupAt     DateTime
+  dropOffAt    DateTime
+  expectedAt   DateTime
+  notes        String        @default("")
+  status       LaundryStatus @default(REQUESTED)
+  batchTag     String        @unique
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  disputes     Dispute[]
+  user         User          @relation(fields: [userId], references: [id])
 
-  @@index([userId])
-  @@index([status])
+  @@index([studentId, createdAt])
+  @@index([status, expectedAt])
 }
 
 model Dispute {
-  id          String         @id @default(cuid())
+  id          String       @id @default(cuid())
   requestId   String
-  request     LaundryRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
-  type        String
+  itemName    String
+  issueType   String
   description String
-  status      DisputeStatus  @default(OPEN)
-  resolution  String         @default("")
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+  status      DisputeStatus @default(OPEN)
+  resolution  String        @default("")
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  request     LaundryRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
 
-  @@index([requestId])
-  @@index([status])
+  @@index([status, createdAt])
 }
