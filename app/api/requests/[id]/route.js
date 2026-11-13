@@ -27,7 +27,12 @@ export async function PATCH(request, { params }) {
         });
         return NextResponse.json(result);
     }
-    catch {
-        return NextResponse.json({ error: "Could not update this laundry request." }, { status: 404 });
-    }
+    catch (error) {
+    console.error("Update laundry request error:", error);
+
+    return NextResponse.json(
+        { error: "Could not update this laundry request." },
+        { status: 500 }
+    );
+
 }
