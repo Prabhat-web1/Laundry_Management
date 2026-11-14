@@ -67,11 +67,13 @@ async function api(url, init) {
   return data ?? {};
 }
 
-
 function dateLabel(value, withTime = false) {
-
-  return new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", ...(withTime ? { hour: "numeric", minute: "2-digit" } : {}) }).format(new Date(value));
-
+  const options = {
+    day: "numeric",
+    month: "short",
+    ...(withTime ? { hour: "numeric", minute: "2-digit" } : {}),
+  };
+    return new Intl.DateTimeFormat("en-IN", options).format(new Date(value));
 }
 
 function itemList(value) {
