@@ -30,9 +30,9 @@ export async function PATCH(request, { params }) {
     catch (error) {
     console.error("Update laundry request error:", error);
 
-    return NextResponse.json(
+        return NextResponse.json(
         { error: "Could not update this laundry request." },
         { status: 500 }
     );
-
+    }
 }
