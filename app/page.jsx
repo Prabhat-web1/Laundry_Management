@@ -10,10 +10,12 @@ import {
   Droplets,
   FileWarning,
   Menu,
+  Moon,
   PackageCheck,
   ShieldCheck,
   Shirt,
   Sparkles,
+  Sun,
   WashingMachine,
   X,
 } from "lucide-react";
@@ -96,7 +98,7 @@ function Photo({ src, alt, className = "" }) {
 
 function scrollToId(id) { document.getElementById(id)?.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "start" }); }
 
-function WashdayLanding({ onGetStarted, onLogin }) {
+function WashdayLanding({ onGetStarted, onLogin, theme = "day", onThemeToggle }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [step, setStep] = useState(0);
   const [paused, setPaused] = useState(false);
@@ -109,11 +111,11 @@ function WashdayLanding({ onGetStarted, onLogin }) {
   useEffect(() => { if (paused || prefersReducedMotion()) return undefined; const timer = setInterval(() => setStep((current) => (current + 1) % JOURNEY.length), 3600); return () => clearInterval(timer); }, [paused]);
   const current = JOURNEY[step];
 
-  return <div className="lp-root" id="top">
+  return <div className={`lp-root ${theme === "night" ? "lp-theme-night" : ""}`} id="top" data-theme={theme}>
     <header className={`lp-nav ${scrolled ? "lp-nav-scrolled" : ""}`}><div className="lp-wrap lp-nav-inner">
       <a className="brand lp-brand" href="#top" onClick={(event) => { event.preventDefault(); window.scrollTo({ top: 0, behavior: "smooth" }); }}><span className="brand-mark"><Droplets size={19} /></span>Washday<span className="brand-dot">.</span></a>
       <nav id="primary-navigation" className={`lp-links ${menuOpen ? "lp-links-open" : ""}`} aria-label="Primary navigation"><button type="button" onClick={jumpTo("services")}>Services</button><button type="button" onClick={jumpTo("how")}>How it works</button><button type="button" onClick={jumpTo("features")}>Features</button><button type="button" onClick={jumpTo("faq")}>FAQ</button><button type="button" className="lp-btn lp-btn-ghost lp-links-login" onClick={goToAuth(onLogin)}>Sign in</button></nav>
-      <div className="lp-nav-actions"><button type="button" className="lp-btn lp-btn-ghost lp-hide-sm" onClick={goToAuth(onLogin)}>Sign in</button><button type="button" className="lp-btn lp-btn-solid" onClick={goToAuth(onGetStarted)}>Get started <ArrowRight size={15} /></button><button type="button" className="lp-menu-toggle" aria-label={menuOpen ? "Close menu" : "Open menu"} aria-controls="primary-navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>{menuOpen ? <X size={20} /> : <Menu size={20} />}</button></div>
+      <div className="lp-nav-actions"><button type="button" className="lp-theme-toggle" aria-label={`Switch to ${theme === "night" ? "day" : "night"} mode`} aria-pressed={theme === "night"} onClick={onThemeToggle}><span className="lp-theme-toggle-icon">{theme === "night" ? <Sun size={15} /> : <Moon size={15} />}</span><span className="lp-theme-toggle-label">{theme === "night" ? "Day" : "Night"}</span></button><button type="button" className="lp-btn lp-btn-ghost lp-hide-sm" onClick={goToAuth(onLogin)}>Sign in</button><button type="button" className="lp-btn lp-btn-solid" onClick={goToAuth(onGetStarted)}>Get started <ArrowRight size={15} /></button><button type="button" className="lp-menu-toggle" aria-label={menuOpen ? "Close menu" : "Open menu"} aria-controls="primary-navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>{menuOpen ? <X size={20} /> : <Menu size={20} />}</button></div>
     </div></header>
 
     <main>

@@ -1,7 +1,7 @@
 "use client";
-import { ArrowDownRight, ArrowRight, ArrowUpRight, Bell, Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, ClipboardList, Clock3, Droplets, FileWarning, LayoutDashboard, LogOut, Menu, PackageCheck, Plus, Search, ShieldCheck, Shirt, Sparkles, WashingMachine, X, } from "lucide-react";
+import { ArrowDownRight, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, ClipboardList, Clock3, Droplets, FileWarning, LayoutDashboard, LogOut, Menu, Moon, PackageCheck, Plus, Search, ShieldCheck, Shirt, Sparkles, Sun, WashingMachine, X, } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { disputeSchema, loginSchema, requestSchema, registerSchema, } from "@/lib/validation";
 const stages = ["REQUESTED", "COLLECTED", "WASHING", "DRYING", "READY", "DELIVERED"];
 const stageLabels = {
@@ -18,7 +18,7 @@ async function api(url, init) {
             "Content-Type": "application/json",
             ...init?.headers,
         },
-    });
+    }); 
     const responseText = await response.text();
     let data = null;
     if (responseText) {
@@ -71,8 +71,37 @@ export default function LaundryDashboard({ landing: Landing = null }) {
     const [notice, setNotice] = useState("");
     const [mobileNav, setMobileNav] = useState(false);
     const [showLanding, setShowLanding] = useState(true);
+    const [theme, setTheme] = useState("day");
+    useEffect(() => {
+        const savedTheme = window.localStorage.getItem("washday-landing-theme");
+        if (savedTheme === "night" || savedTheme === "day")
+            setTheme(savedTheme);
+    }, []);
+    useEffect(() => { window.localStorage.setItem("washday-landing-theme", theme); }, [theme]);
     const session = useQuery({ queryKey: ["session"], queryFn: () => api("/api/auth/session"), retry: false });
     const user = session.data?.user ?? null;
+    useEffect(() => {
+        const handleHistoryChange = () => {
+            setShowLanding(window.location.hash !== "#login");
+        };
+        handleHistoryChange();
+        window.addEventListener("popstate", handleHistoryChange);
+        window.addEventListener("hashchange", handleHistoryChange);
+        return () => {
+            window.removeEventListener("popstate", handleHistoryChange);
+            window.removeEventListener("hashchange", handleHistoryChange);
+        };
+    }, []);
+    const openLogin = () => {
+        if (window.location.hash !== "#login")
+            window.history.pushState({ washdayScreen: "login" }, "", "#login");
+        setShowLanding(false);
+    };
+    const returnToLanding = () => {
+        setShowLanding(true);
+        if (window.location.hash === "#login")
+            window.history.back();
+    };
     const requestsQuery = useQuery({ queryKey: ["requests", user?.id], queryFn: () => api("/api/requests"), enabled: !!user });
     const requests = requestsQuery.data ?? [];
     const disputes = useMemo(() => requests.flatMap((request) => request.disputes.map((dispute) => ({ ...dispute, request }))), [requests]);
@@ -108,12 +137,12 @@ export default function LaundryDashboard({ landing: Landing = null }) {
         return <div className="boot-screen"><div className="load-error"><CircleHelp size={22}/><strong>We couldn’t reach Washday.</strong><span>Check the app server and reload this page.</span><button className="button button-primary" onClick={() => session.refetch()}>Try again</button></div></div>;
     if (!user)
         return showLanding && Landing
-            ? <Landing onGetStarted={() => setShowLanding(false)} onLogin={() => setShowLanding(false)} />
-            : <LoginScreen onSuccess={() => queryClient.invalidateQueries({ queryKey: ["session"] })}/>;
+            ? <Landing theme={theme} onThemeToggle={() => setTheme((currentTheme) => currentTheme === "night" ? "day" : "night")} onGetStarted={openLogin} onLogin={openLogin} />
+            : <LoginScreen onBack={returnToLanding} onSuccess={() => queryClient.invalidateQueries({ queryKey: ["session"] })}/>;
     const navItems = isStaff
         ? [{ id: "overview", label: "Overview", icon: LayoutDashboard }, { id: "operations", label: "Laundry operations", icon: WashingMachine }, { id: "disputes", label: "Dispute desk", icon: FileWarning, count: openDisputes }]
         : [{ id: "overview", label: "Overview", icon: LayoutDashboard }, { id: "laundry", label: "My laundry", icon: Shirt }, { id: "help", label: "Reports & help", icon: CircleHelp, count: openDisputes }];
-    return <div className="app-shell">
+    return <div className={`app-shell ${theme === "night" ? "app-theme-night" : ""}`}>
 
     <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
 
@@ -135,7 +164,7 @@ export default function LaundryDashboard({ landing: Landing = null }) {
 
     <main className="main-shell">
 
-      <header className="topbar"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileNav(!mobileNav)}><Menu size={20}/></button><div className="breadcrumb"><span>{user.hostel || "Maple House"}</span><ChevronRight size={14}/><strong>{titleMap[tab]}</strong></div><div className="topbar-actions"><span className="today-label">{currentDate}</span><button className="icon-button notification-button" title="Notifications"><Bell size={18}/><i /></button><div className="top-avatar">{user.name.charAt(0)}</div></div></header>
+      <header className="topbar"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileNav(!mobileNav)}><Menu size={20}/></button><div className="breadcrumb"><span>{user.hostel || "Maple House"}</span><ChevronRight size={14}/><strong>{titleMap[tab]}</strong></div><div className="topbar-actions"><span className="today-label">{currentDate}</span><button type="button" className="dashboard-theme-toggle" aria-label={`Switch to ${theme === "night" ? "day" : "night"} mode`} aria-pressed={theme === "night"} onClick={() => setTheme((currentTheme) => currentTheme === "night" ? "day" : "night")}><span>{theme === "night" ? <Sun size={15}/> : <Moon size={15}/>}</span><small>{theme === "night" ? "Day" : "Night"}</small></button><button className="icon-button notification-button" title="Notifications"><Bell size={18}/><i /></button><div className="top-avatar">{user.name.charAt(0)}</div></div></header>
 
       {notice && <div className="toast-note"><CheckCircle2 size={16}/>{notice}<button onClick={() => setNotice("")} aria-label="Dismiss"><X size={14}/></button></div>}
 
@@ -183,7 +212,7 @@ export default function LaundryDashboard({ landing: Landing = null }) {
 
   </div>;
 }
-function LoginScreen({ onSuccess }) {
+function LoginScreen({ onSuccess, onBack }) {
     const [mode, setMode] = useState("login");
     const [role, setRole] = useState("STUDENT");
     const [name, setName] = useState("");
@@ -255,6 +284,8 @@ function LoginScreen({ onSuccess }) {
         registerMutation.reset();
     };
     return (<main className="login-screen">
+
+      {onBack && <button type="button" className="login-back-button" onClick={onBack}><ArrowLeft size={16}/>Back to landing</button>}
 
       <div className="login-card">
 
